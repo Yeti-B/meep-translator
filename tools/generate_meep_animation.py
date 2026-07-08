@@ -14,8 +14,10 @@ FRAME_DURATION_MS = 50
 PAUSE_DURATION_MS = 500
 SWING_CYCLES = 3
 CYCLE_FRAMES = 8
-BODY_SWING_PX = 9.0
-BODY_BOB_PX = 0.5
+BODY_SWING_PX = 6.0
+BODY_BOB_PX = 0.0
+ELASTIC_NECK_FOLLOW = 0.45
+ELASTIC_NECK_ALPHA = 0.62
 
 
 def alpha_bbox(image: Image.Image) -> tuple[int, int, int, int]:
@@ -56,62 +58,87 @@ def draw_scaled_ellipse(
     draw.ellipse(tuple(round(value * MASK_SCALE) for value in box), fill=fill)
 
 
-def make_static_head_mask() -> Image.Image:
+def make_head_pin_mask() -> Image.Image:
     size = CANVAS_SIZE * MASK_SCALE
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
 
-    # Pin only the head, eye, bill, and bill root. The front chest and both
-    # legs remain in the moving region so the meep reads as a whole-body bob.
-    draw_scaled_ellipse(draw, (121, 37, 163, 91), 255)
-    draw.polygon(scaled_points([(141, 56), (191, 80), (192, 137), (138, 92)]), fill=255)
-    draw.polygon(scaled_points([(131, 69), (182, 88), (181, 134), (128, 112)]), fill=255)
-    draw.polygon(scaled_points([(114, 55), (151, 49), (160, 105), (116, 107), (106, 84)]), fill=255)
+    # Fixed cover for the face and full bill. Keep the lower-left edge tight so
+    # the front chest remains part of the moving body layer.
+    draw_scaled_ellipse(draw, (122, 38, 163, 88), 255)
+    draw.polygon(scaled_points([(105, 56), (121, 45), (151, 48), (163, 67), (154, 88), (132, 94), (112, 77)]), fill=255)
+    draw.polygon(scaled_points([(136, 57), (192, 92), (192, 113), (132, 81)]), fill=255)
+    draw.line(scaled_points([(139, 60), (192, 100)]), fill=255, width=round(13 * MASK_SCALE))
+    draw.line(scaled_points([(134, 73), (188, 127)]), fill=255, width=round(11 * MASK_SCALE))
+    draw.polygon(scaled_points([(132, 62), (147, 58), (153, 74), (135, 82)]), fill=255)
 
-    return mask.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS)
+    return mask.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS).filter(
+        ImageFilter.GaussianBlur(0.45)
+    )
+
+
+def make_neck_blend_mask() -> Image.Image:
+    size = CANVAS_SIZE * MASK_SCALE
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+
+    # A feathered bridge over the head/body joint. This local layer follows the
+    # body partway, which softens the seam without breaking whole-body motion.
+    draw.polygon(
+        scaled_points([(94, 50), (116, 42), (148, 58), (150, 82), (131, 104), (99, 84)]),
+        fill=255,
+    )
+
+    return mask.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS).filter(
+        ImageFilter.GaussianBlur(2.0)
+    )
+
+
+def clean_transparent_pixels(image: Image.Image) -> Image.Image:
+    rgba = np.asarray(image.convert("RGBA")).copy()
+    rgba[rgba[..., 3] == 0, :3] = 0
+    return Image.fromarray(rgba, "RGBA")
+
+
+def apply_alpha_mask(image: Image.Image, mask: np.ndarray) -> Image.Image:
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32).copy()
+    rgba[..., 3] *= np.clip(mask, 0.0, 1.0)
+    return clean_transparent_pixels(
+        Image.fromarray(np.clip(np.round(rgba), 0, 255).astype(np.uint8), "RGBA")
+    )
+
+
+def make_layer_masks(base: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    alpha = np.asarray(base.convert("RGBA").getchannel("A"), dtype=np.float32) / 255.0
+    head = np.asarray(make_head_pin_mask(), dtype=np.float32) / 255.0
+    neck = np.asarray(make_neck_blend_mask(), dtype=np.float32) / 255.0
+
+    head = np.clip(head * alpha, 0.0, 1.0)
+    neck = np.clip(neck * alpha * ELASTIC_NECK_ALPHA, 0.0, 1.0)
+    body = np.clip(alpha * (1.0 - head), 0.0, 1.0)
+    return body, neck, head
 
 
 def make_motion_weight(base: Image.Image) -> Image.Image:
-    static_head = np.asarray(make_static_head_mask(), dtype=np.float32) / 255.0
-    static_head = np.asarray(
-        Image.fromarray(np.uint8(static_head * 255)).filter(ImageFilter.GaussianBlur(0.7)),
-        dtype=np.float32,
-    ) / 255.0
-
-    alpha = np.asarray(base.getchannel("A"), dtype=np.float32) / 255.0
-    weight = 1.0 - static_head
-    weight = np.clip(weight * alpha, 0.0, 1.0)
-    return Image.fromarray(np.uint8(np.round(weight * 255)), "L")
+    body, _, _ = make_layer_masks(base)
+    return Image.fromarray(np.uint8(np.round(body * 255)), "L")
 
 
-def bilinear_sample(image_array: np.ndarray, sample_x: np.ndarray, sample_y: np.ndarray) -> np.ndarray:
-    height, width, _ = image_array.shape
-    sample_x = np.clip(sample_x, 0.0, width - 1.001)
-    sample_y = np.clip(sample_y, 0.0, height - 1.001)
+def offset_layer(layer: Image.Image, dx: float, dy: float) -> Image.Image:
+    x_offset = round(dx)
+    y_offset = round(dy)
+    canvas = Image.new("RGBA", layer.size, (0, 0, 0, 0))
 
-    x0 = np.floor(sample_x).astype(np.int32)
-    y0 = np.floor(sample_y).astype(np.int32)
-    x1 = np.clip(x0 + 1, 0, width - 1)
-    y1 = np.clip(y0 + 1, 0, height - 1)
+    src_left = max(0, -x_offset)
+    src_top = max(0, -y_offset)
+    src_right = min(layer.width, layer.width - x_offset)
+    src_bottom = min(layer.height, layer.height - y_offset)
+    if src_left >= src_right or src_top >= src_bottom:
+        return canvas
 
-    wx = sample_x - x0
-    wy = sample_y - y0
-
-    top = image_array[y0, x0] * (1.0 - wx[..., None]) + image_array[y0, x1] * wx[..., None]
-    bottom = image_array[y1, x0] * (1.0 - wx[..., None]) + image_array[y1, x1] * wx[..., None]
-    return top * (1.0 - wy[..., None]) + bottom * wy[..., None]
-
-
-def warp_frame(base: Image.Image, weight: Image.Image, dx: float, dy: float) -> Image.Image:
-    image_array = np.asarray(base, dtype=np.float32)
-    motion = np.asarray(weight, dtype=np.float32) / 255.0
-    yy, xx = np.mgrid[0:CANVAS_SIZE, 0:CANVAS_SIZE].astype(np.float32)
-
-    sample_x = xx - dx * motion
-    sample_y = yy - dy * motion
-    warped = bilinear_sample(image_array, sample_x, sample_y)
-    warped = np.clip(np.round(warped), 0, 255).astype(np.uint8)
-    return Image.fromarray(warped)
+    crop = layer.crop((src_left, src_top, src_right, src_bottom))
+    canvas.alpha_composite(crop, (max(0, x_offset), max(0, y_offset)))
+    return clean_transparent_pixels(canvas)
 
 
 def make_offsets() -> list[tuple[float, float]]:
@@ -133,8 +160,19 @@ def make_durations(frame_count: int) -> list[int]:
 
 
 def build_frames(base: Image.Image) -> tuple[list[Image.Image], Image.Image]:
-    weight = make_motion_weight(base)
-    frames = [warp_frame(base, weight, dx, dy) for dx, dy in make_offsets()]
+    body_mask, neck_mask, head_mask = make_layer_masks(base)
+    body_layer = apply_alpha_mask(base, body_mask)
+    neck_layer = apply_alpha_mask(base, neck_mask)
+    head_layer = apply_alpha_mask(base, head_mask)
+    frames: list[Image.Image] = []
+    for dx, dy in make_offsets():
+        frame = offset_layer(body_layer, dx, dy)
+        frame.alpha_composite(
+            offset_layer(neck_layer, dx * ELASTIC_NECK_FOLLOW, dy * ELASTIC_NECK_FOLLOW)
+        )
+        frame.alpha_composite(head_layer)
+        frames.append(clean_transparent_pixels(frame))
+    weight = Image.fromarray(np.uint8(np.round(body_mask * 255)), "L")
     return frames, weight
 
 
@@ -173,12 +211,14 @@ def main() -> None:
     parser.add_argument(
         "--preview",
         type=Path,
-        default=Path("extension/icons/woodcock-meep-preview.png"),
+        default=None,
+        help="Optional path for a frame-strip preview.",
     )
     parser.add_argument(
         "--weight-preview",
         type=Path,
-        default=Path("extension/icons/woodcock-meep-weight.png"),
+        default=None,
+        help="Optional path for the body motion mask preview.",
     )
     args = parser.parse_args()
 
@@ -198,17 +238,21 @@ def main() -> None:
         loop=0,
         lossless=True,
         method=6,
-        disposal=2,
+        exact=True,
     )
-    save_preview(frames, args.preview)
-    save_weight_preview(weight, args.weight_preview)
+    if args.preview:
+        save_preview(frames, args.preview)
+    if args.weight_preview:
+        save_weight_preview(weight, args.weight_preview)
 
     with Image.open(args.out) as animated:
         frame_count = sum(1 for _ in ImageSequence.Iterator(animated))
 
     print(f"wrote {args.out} ({frame_count} frames)")
-    print(f"wrote {args.preview}")
-    print(f"wrote {args.weight_preview}")
+    if args.preview:
+        print(f"wrote {args.preview}")
+    if args.weight_preview:
+        print(f"wrote {args.weight_preview}")
     print(f"timing: {frame_count - 1} motion frames @ {FRAME_DURATION_MS}ms + 1 pause @ {PAUSE_DURATION_MS}ms")
 
 

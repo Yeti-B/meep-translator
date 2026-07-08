@@ -272,7 +272,10 @@ chrome.contextMenus.onClicked.addListener((info) => {
     sendToActiveTab({ type: "translator:start" });
   }
   if (info.menuItemId === "translate-selection") {
-    sendToActiveTab({ type: "translator:translate-selection" });
+    sendToActiveTab({
+      type: "translator:translate-selection",
+      selectedText: info.selectionText || "",
+    });
   }
   if (info.menuItemId === "restore-page") {
     sendToActiveTab({ type: "translator:restore" });

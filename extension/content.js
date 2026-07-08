@@ -24,6 +24,10 @@
   const PET_POSITION_KEY = "meepTranslatorPetPosition";
   const MAX_BATCH_ITEMS = 32;
   const MAX_BATCH_CHARS = 4200;
+  const MAX_SELECTION_CHARS = 12000;
+  const SELECTION_TRANSLATION_ATTR = "data-meep-selection-translation";
+  const TRANSLATABLE_TEXT_PATTERN = /[A-Za-z\u00C0-\u024F\u0400-\u052F\u3040-\u30FF\uAC00-\uD7AF]/;
+  const PUNCTUATION_ONLY_PATTERN = /^[\d\s.,:;!?()[\]{}'"“”‘’/@#$%^&*+=|\\-]+$/;
 
   const state = {
     enabled: false,
@@ -36,6 +40,7 @@
     originalText: new WeakMap(),
     translationByNode: new WeakMap(),
     translationCache: new Map(),
+    selectionOriginalFragments: new WeakMap(),
     translated: new WeakSet(),
     partiallyTranslated: new WeakSet(),
     showingOriginal: false,
@@ -186,6 +191,23 @@
     return text.replace(/\s+/g, " ").trim();
   }
 
+  function normalizeSelectionText(text) {
+    return String(text || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/[ \t\f\v]+/g, " ")
+      .replace(/\s*\n\s*/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function isTranslatableText(text) {
+    const normalized = normalizeText(text);
+    if (normalized.length < 2) return false;
+    if (!TRANSLATABLE_TEXT_PATTERN.test(normalized)) return false;
+    if (PUNCTUATION_ONLY_PATTERN.test(normalized)) return false;
+    return true;
+  }
+
   function cacheKeyForText(text) {
     return [
       state.settings?.targetLanguage || "Simplified Chinese",
@@ -224,13 +246,7 @@
     if (isSkippableNode(node)) return false;
     const text = normalizeText(node.nodeValue || "");
     if (text.length < 2) return false;
-    if (!/[A-Za-z\u00C0-\u024F\u0400-\u052F\u3040-\u30FF\uAC00-\uD7AF]/.test(text)) {
-      return false;
-    }
-    if (/^[\d\s.,:;!?()[\]{}'"“”‘’/@#$%^&*+=|\\-]+$/.test(text)) {
-      return false;
-    }
-    return isNearViewport(node.parentElement);
+    return isTranslatableText(text) && isNearViewport(node.parentElement);
   }
 
   function isNearViewport(element) {
@@ -414,59 +430,109 @@
     return true;
   }
 
-  function collectSelectedTextItems() {
-    const selection = window.getSelection?.();
-    if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
-
-    const items = [];
-    for (let rangeIndex = 0; rangeIndex < selection.rangeCount; rangeIndex += 1) {
-      const range = selection.getRangeAt(rangeIndex);
-      if (range.collapsed || !normalizeText(range.toString())) continue;
-
-      const root =
-        range.commonAncestorContainer.nodeType === Node.TEXT_NODE
-          ? range.commonAncestorContainer.parentNode
-          : range.commonAncestorContainer;
-      if (!root) continue;
-
-      const addNode = (node) => {
-        if (isSkippableNode(node)) return;
-        const value = node.nodeValue || "";
-        let start = node === range.startContainer ? range.startOffset : 0;
-        let end = node === range.endContainer ? range.endOffset : value.length;
-        start = Math.max(0, Math.min(start, value.length));
-        end = Math.max(start, Math.min(end, value.length));
-        const selectedText = value.slice(start, end);
-        const text = normalizeText(selectedText);
-        if (text.length < 2) return;
-        if (!/[A-Za-z\u00C0-\u024F\u0400-\u052F\u3040-\u30FF\uAC00-\uD7AF]/.test(text)) return;
-        if (/^[\d\s.,:;!?()[\]{}'"“”‘’/@#$%^&*+=|\\-]+$/.test(text)) return;
-        items.push({ node, start, end, text: selectedText, normalizedText: text });
-      };
-
-      if (range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
-        addNode(range.commonAncestorContainer);
-        continue;
+  function isSelectionBlockedNode(node) {
+    const parent =
+      node.nodeType === Node.TEXT_NODE
+        ? node.parentElement
+        : node.nodeType === Node.ELEMENT_NODE
+          ? node
+          : node.documentElement;
+    if (!parent) return true;
+    if (parent.closest(`#${UI_ID}`)) return true;
+    if (parent.isContentEditable) return true;
+    for (let el = parent; el; el = el.parentElement) {
+      if (
+        [
+          "SCRIPT",
+          "STYLE",
+          "NOSCRIPT",
+          "IFRAME",
+          "CANVAS",
+          "SVG",
+          "VIDEO",
+          "AUDIO",
+          "TEXTAREA",
+          "INPUT",
+          "SELECT",
+          "OPTION",
+        ].includes(el.tagName)
+      ) {
+        return true;
       }
+      if (el.getAttribute("translate") === "no") return true;
+      if (el.getAttribute("aria-hidden") === "true") return true;
+    }
+    return false;
+  }
 
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          try {
-            return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-          } catch {
-            return NodeFilter.FILTER_REJECT;
-          }
-        },
-      });
+  function getRangeRoot(range) {
+    return range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+      ? range.commonAncestorContainer.parentNode
+      : range.commonAncestorContainer;
+  }
 
-      while (true) {
-        const node = walker.nextNode();
-        if (!node) break;
-        addNode(node);
-      }
+  function collectTextNodesInRange(range) {
+    const root = getRangeRoot(range);
+    if (!root) return [];
+    if (range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
+      return isSelectionBlockedNode(range.commonAncestorContainer)
+        ? []
+        : [range.commonAncestorContainer];
     }
 
-    return items;
+    const nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        try {
+          if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
+          return isSelectionBlockedNode(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        } catch {
+          return NodeFilter.FILTER_REJECT;
+        }
+      },
+    });
+
+    while (true) {
+      const node = walker.nextNode();
+      if (!node) break;
+      nodes.push(node);
+    }
+    return nodes;
+  }
+
+  function collectSelectedRangeItem(expectedText = "") {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+
+    for (let rangeIndex = 0; rangeIndex < selection.rangeCount; rangeIndex += 1) {
+      const range = selection.getRangeAt(rangeIndex).cloneRange();
+      if (range.collapsed || !normalizeText(range.toString())) continue;
+      if (isSelectionBlockedNode(range.commonAncestorContainer)) continue;
+
+      const selectedText = range.toString();
+      const normalizedText = normalizeSelectionText(selectedText);
+      if (!isTranslatableText(normalizedText)) continue;
+      if (normalizedText.length > MAX_SELECTION_CHARS) {
+        setStatus(`选中内容过长，请控制在 ${MAX_SELECTION_CHARS} 字内`, true);
+        return { blocked: true };
+      }
+      const textNodes = collectTextNodesInRange(range);
+      if (!textNodes.length) continue;
+      const expectedNormalized = normalizeText(expectedText || "");
+      if (expectedNormalized && expectedNormalized !== normalizeText(selectedText)) {
+        setStatus("选区已变化，请重新选择后再翻译", true);
+        return { blocked: true };
+      }
+      return {
+        range,
+        text: selectedText,
+        normalizedText,
+        textNodes,
+        originalFragment: range.cloneContents(),
+      };
+    }
+
+    return null;
   }
 
   function removeNodesFromQueue(nodesToRemove) {
@@ -478,65 +544,45 @@
     });
   }
 
-  function buildSelectionBatches(items) {
-    const batches = [];
-    let batch = [];
-    let charCount = 0;
-    for (const item of items) {
-      const length = item.normalizedText.length;
-      if (batch.length && (batch.length >= MAX_BATCH_ITEMS || charCount + length > MAX_BATCH_CHARS)) {
-        batches.push(batch);
-        batch = [];
-        charCount = 0;
-      }
-      batch.push(item);
-      charCount += length;
-    }
-    if (batch.length) batches.push(batch);
-    return batches;
-  }
-
-  function applySelectedTranslations(items, translations) {
-    let appliedCount = 0;
-    const indexedItems = items.map((item, index) => ({ ...item, translation: translations[index] }));
-    indexedItems.sort((a, b) => {
-      if (a.node === b.node) return b.start - a.start;
-      const position = a.node.compareDocumentPosition(b.node);
-      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return 1;
-      if (position & Node.DOCUMENT_POSITION_PRECEDING) return -1;
+  function applySelectedRangeTranslation(item, translation) {
+    if (!translation || !item.range.startContainer.isConnected || !item.range.endContainer.isConnected) {
+      for (const node of item.textNodes) state.failed.add(node);
       return 0;
-    });
-
-    for (const item of indexedItems) {
-      if (!item.translation || !item.node.parentNode) {
-        state.failed.add(item.node);
-        continue;
-      }
-      const currentText = item.node.nodeValue || "";
-      if (item.end > currentText.length) {
-        state.failed.add(item.node);
-        continue;
-      }
-      if (!state.originalText.has(item.node)) {
-        state.originalText.set(item.node, currentText);
-      }
-      const selectedText = currentText.slice(item.start, item.end);
-      const replacement = renderTranslation(selectedText, item.translation);
-      item.node.nodeValue =
-        currentText.slice(0, item.start) + replacement + currentText.slice(item.end);
-      state.translationCache.set(cacheKeyForText(item.text), item.translation);
-      state.translated.add(item.node);
-      state.partiallyTranslated.add(item.node);
-      state.failed.delete(item.node);
-      appliedCount += 1;
     }
+    if (normalizeText(item.range.toString()) !== normalizeText(item.text)) {
+      for (const node of item.textNodes) state.failed.add(node);
+      setStatus("选区内容已变化，请重新选择后再翻译", true);
+      return 0;
+    }
+
+    const leadingWhitespace = item.text.match(/^\s*/)?.[0] || "";
+    const trailingWhitespace = item.text.match(/\s*$/)?.[0] || "";
+    const replacementText =
+      leadingWhitespace + renderTranslation(item.normalizedText, translation) + trailingWhitespace;
+    const marker = document.createElement("span");
+    marker.setAttribute(SELECTION_TRANSLATION_ATTR, "true");
+    marker.style.display = "contents";
+    marker.style.whiteSpace = "pre-wrap";
+    marker.textContent = replacementText;
+
+    item.range.deleteContents();
+    item.range.insertNode(marker);
+    state.translationCache.set(cacheKeyForText(item.normalizedText), translation);
+    for (const node of item.textNodes) {
+      state.translated.add(node);
+      state.partiallyTranslated.add(node);
+      state.failed.delete(node);
+    }
+    state.originalText.set(marker.firstChild || marker, item.text);
+    state.selectionOriginalFragments.set(marker, item.originalFragment);
     state.showingOriginal = false;
-    return appliedCount;
+    return 1;
   }
 
-  async function translateSelection() {
-    const items = collectSelectedTextItems();
-    if (!items.length) return false;
+  async function translateSelection(expectedText = "") {
+    const item = collectSelectedRangeItem(expectedText);
+    if (item?.blocked) return true;
+    if (!item) return false;
     if (state.selectionBusy) {
       setStatus("正在翻译，请稍候...");
       return true;
@@ -545,35 +591,36 @@
     const settings = await ensureSettings();
     if (!settings) return true;
     createToolbar();
-    removeNodesFromQueue(new Set(items.map((item) => item.node)));
-    for (const item of items) {
-      state.failed.delete(item.node);
+    if (item.textNodes.some((node) => state.inFlight.has(node))) {
+      setStatus("选区正在页面翻译队列中，请稍后再试", true);
+      return true;
+    }
+    removeNodesFromQueue(new Set(item.textNodes));
+    for (const node of item.textNodes) {
+      state.failed.delete(node);
     }
     state.selectionBusy = true;
     updatePetState();
 
     let appliedCount = 0;
     try {
-      const batches = buildSelectionBatches(items);
-      for (const batch of batches) {
-        setStatus(`正在翻译选中内容 ${batch.length} 段...`);
-        const result = await sendMessage({
-          type: "translator:translate",
-          texts: batch.map((item) => item.normalizedText),
-          pageTitle: document.title,
-          pageUrl: location.href,
-        });
+      setStatus("正在翻译选中内容...");
+      const result = await sendMessage({
+        type: "translator:translate",
+        texts: [item.normalizedText],
+        pageTitle: document.title,
+        pageUrl: location.href,
+      });
 
-        if (!result) break;
-        if (!result.ok) {
-          for (const item of batch) state.failed.add(item.node);
-          setStatus(result?.error || "翻译失败，请检查本地代理。", true);
-          return true;
-        }
-        appliedCount += applySelectedTranslations(batch, result.translations || []);
+      if (!result) return true;
+      if (!result.ok) {
+        for (const node of item.textNodes) state.failed.add(node);
+        setStatus(result?.error || "翻译失败，请检查本地代理。", true);
+        return true;
       }
+      appliedCount = applySelectedRangeTranslation(item, result.translations?.[0] || "");
       window.getSelection?.()?.removeAllRanges();
-      setStatus(`已翻译选中内容 ${appliedCount} 段`);
+      setStatus(appliedCount ? "已翻译选中内容" : "未能替换选中内容");
       return true;
     } finally {
       state.selectionBusy = false;
@@ -584,6 +631,14 @@
 
   function restoreOriginals(root = document.body) {
     if (!root) return;
+    for (const marker of root.querySelectorAll?.(`[${SELECTION_TRANSLATION_ATTR}]`) || []) {
+      const fragment = state.selectionOriginalFragments.get(marker);
+      if (fragment) {
+        marker.replaceWith(fragment.cloneNode(true));
+      } else {
+        marker.replaceWith(document.createTextNode(marker.textContent || ""));
+      }
+    }
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     while (true) {
       const node = walker.nextNode();
@@ -1053,7 +1108,7 @@
       startTranslation();
     }
     if (message?.type === "translator:translate-selection") {
-      translateSelection();
+      translateSelection(message.selectedText || "");
     }
     if (message?.type === "translator:toggle") {
       if (state.enabled) stopTranslation();
