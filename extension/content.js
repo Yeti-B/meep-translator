@@ -32,6 +32,7 @@
     settings: null,
     queue: [],
     queued: new WeakSet(),
+    inFlight: new WeakSet(),
     originalText: new WeakMap(),
     translationByNode: new WeakMap(),
     translationCache: new Map(),
@@ -72,6 +73,7 @@
     state.autoTranslate = false;
     state.queue = [];
     state.queued = new WeakSet();
+    state.inFlight = new WeakSet();
     window.clearTimeout(state.scrollTimer);
     detachObservers();
     setStatus("扩展已重新加载，请刷新页面", true);
@@ -210,8 +212,13 @@
     return state.translationCache.get(key);
   }
 
-  function shouldTranslateNode(node) {
-    if (isFullyTranslated(node) || state.failed.has(node) || state.queued.has(node)) {
+  function shouldTranslateNode(node, options = {}) {
+    if (
+      isFullyTranslated(node) ||
+      state.inFlight.has(node) ||
+      state.failed.has(node) ||
+      (!options.includeQueued && state.queued.has(node))
+    ) {
       return false;
     }
     if (isSkippableNode(node)) return false;
@@ -238,11 +245,11 @@
     return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
   }
 
-  function collectCandidateNodes(root = document.body) {
+  function collectCandidateNodes(root = document.body, options = {}) {
     if (!root) return [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
-        return shouldTranslateNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        return shouldTranslateNode(node, options) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       },
     });
 
@@ -255,18 +262,37 @@
     return nodes;
   }
 
+  function prioritizeQueuedNodes(nodes) {
+    if (!nodes.length) return;
+    const priorityNodes = [];
+    const seen = new Set();
+
+    for (const node of nodes) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      priorityNodes.push(node);
+      state.queued.add(node);
+    }
+
+    state.queue = [
+      ...priorityNodes,
+      ...state.queue.filter((node) => !seen.has(node)),
+    ];
+  }
+
   function enqueueVisibleText(root) {
     if (!state.enabled) return;
-    for (const node of collectCandidateNodes(root)) {
+    const nodesToPrioritize = [];
+    for (const node of collectCandidateNodes(root, { includeQueued: true })) {
       const original = state.originalText.get(node) || node.nodeValue || "";
       const cached = getCachedTranslation(node, original);
       if (cached) {
         applyCachedTranslation(node, cached);
         continue;
       }
-      state.queue.push(node);
-      state.queued.add(node);
+      nodesToPrioritize.push(node);
     }
+    prioritizeQueuedNodes(nodesToPrioritize);
     if (state.queue.length && !state.busy) processQueue();
   }
 
@@ -308,6 +334,7 @@
       while (state.enabled && state.queue.length) {
         const { nodes, texts } = buildBatch();
         if (!nodes.length) break;
+        for (const node of nodes) state.inFlight.add(node);
         setStatus(`正在翻译 ${nodes.length} 段...`);
 
         const result = await sendMessage({
@@ -317,10 +344,16 @@
           pageUrl: location.href,
         });
 
-        if (!result) break;
+        if (!result) {
+          for (const node of nodes) state.inFlight.delete(node);
+          break;
+        }
 
         if (!result.ok) {
-          for (const node of nodes) state.failed.add(node);
+          for (const node of nodes) {
+            state.failed.add(node);
+            state.inFlight.delete(node);
+          }
           setStatus(result?.error || "翻译失败，请检查本地代理。", true);
           await sleep(1200);
           break;
@@ -344,6 +377,7 @@
       const translatedText = translations[index];
       if (!translatedText || !node.parentNode) {
         state.failed.add(node);
+        state.inFlight.delete(node);
         return;
       }
       if (!state.originalText.has(node)) {
@@ -356,6 +390,7 @@
       state.translationCache.set(cacheKey, translatedText);
       node.nodeValue = renderTranslation(original, translatedText);
       state.translated.add(node);
+      state.inFlight.delete(node);
       state.partiallyTranslated.delete(node);
       state.failed.delete(node);
       appliedCount += 1;
