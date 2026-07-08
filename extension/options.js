@@ -13,7 +13,6 @@ const fields = {
 
 const directPanel = document.querySelector("#directPanel");
 const proxyPanel = document.querySelector("#proxyPanel");
-const customModelField = document.querySelector("#customModelField");
 const statusEl = document.querySelector("#status");
 const MODEL_PRESETS = new Set(["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]);
 
@@ -31,10 +30,6 @@ function setProviderMode(value) {
   if (input) input.checked = true;
   directPanel.hidden = value !== "direct";
   proxyPanel.hidden = value !== "proxy";
-}
-
-function updateCustomModelVisibility() {
-  customModelField.hidden = fields.modelPreset.value !== "custom";
 }
 
 async function loadSettings() {
@@ -57,7 +52,6 @@ async function loadSettings() {
     fields.modelPreset.value = "custom";
     fields.customModel.value = storedModel;
   }
-  updateCustomModelVisibility();
 }
 
 function readSettings() {
@@ -82,6 +76,10 @@ function readSettings() {
 
 async function saveSettings() {
   const patch = readSettings();
+  if (patch.providerMode === "direct" && !patch.model) {
+    setStatus("请先选择模型，或填写自定义模型名。", "error");
+    throw new Error("Model is required.");
+  }
   await chrome.runtime.sendMessage({ type: "translator:save-settings", patch });
   setStatus("已保存", "ok");
   return patch;
@@ -109,7 +107,17 @@ fields.baseUrl.addEventListener("change", () => {
   }
 });
 
-fields.modelPreset.addEventListener("change", updateCustomModelVisibility);
+fields.modelPreset.addEventListener("change", () => {
+  if (fields.modelPreset.value === "custom") {
+    fields.customModel.focus();
+  }
+});
+
+fields.customModel.addEventListener("input", () => {
+  if (fields.customModel.value.trim()) {
+    fields.modelPreset.value = "custom";
+  }
+});
 
 document.querySelector("#save").addEventListener("click", saveSettings);
 document.querySelector("#saveTop").addEventListener("click", saveSettings);

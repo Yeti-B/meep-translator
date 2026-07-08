@@ -40,7 +40,7 @@ OpenAI-compatible 中转示例：
 API Key：你的中转 key
 Base URL：https://colabapi.com/v1
 API 模式：Chat Completions 兼容
-模型：先从下拉菜单选择；如果服务商给了特殊模型名，选择“自定义模型名”
+模型：先从下拉菜单选择；如果服务商给了特殊模型名，选择“自定义模型名”并在下方输入框填写
 ```
 
 填完后点击“保存设置”，再点“测试连接”。测试成功后就可以翻译网页。
@@ -65,7 +65,7 @@ API 模式：Chat Completions 兼容
 ```text
 速度优先：GPT-5.4 nano、GPT-5.4 mini
 质量优先：GPT-5.4、GPT-5.5
-自定义模型名：用于 ColabAPI、one-api、new-api 等中转服务
+自定义模型名：用于 ColabAPI、one-api、new-api 等中转服务；下拉选择“自定义模型名”后，在下方输入框填写服务商给出的模型名
 ```
 
 论文翻译推荐：
