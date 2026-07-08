@@ -36,6 +36,7 @@
     translationByNode: new WeakMap(),
     translationCache: new Map(),
     translated: new WeakSet(),
+    partiallyTranslated: new WeakSet(),
     showingOriginal: false,
     failed: new WeakSet(),
     toolbar: null,
@@ -69,6 +70,7 @@
     state.enabled = false;
     state.autoTranslate = false;
     state.queue = [];
+    state.queued = new WeakSet();
     window.clearTimeout(state.scrollTimer);
     detachObservers();
     setStatus("扩展已重新加载，请刷新页面", true);
@@ -196,6 +198,10 @@
     return translation;
   }
 
+  function isFullyTranslated(node) {
+    return state.translated.has(node) && !state.partiallyTranslated.has(node);
+  }
+
   function getCachedTranslation(node, original) {
     const key = cacheKeyForText(original);
     const nodeCache = state.translationByNode.get(node);
@@ -204,7 +210,7 @@
   }
 
   function shouldTranslateNode(node) {
-    if (state.translated.has(node) || state.failed.has(node) || state.queued.has(node)) {
+    if (isFullyTranslated(node) || state.failed.has(node) || state.queued.has(node)) {
       return false;
     }
     if (isSkippableNode(node)) return false;
@@ -270,6 +276,7 @@
 
     while (state.queue.length && nodes.length < MAX_BATCH_ITEMS) {
       const node = state.queue.shift();
+      state.queued.delete(node);
       const original = state.originalText.get(node) || node.nodeValue || "";
       const cached = getCachedTranslation(node, original);
       if (cached) {
@@ -277,11 +284,12 @@
         continue;
       }
       const text = normalizeText(original);
-      if (!text || state.translated.has(node) || state.failed.has(node) || isSkippableNode(node)) {
+      if (!text || isFullyTranslated(node) || state.failed.has(node) || isSkippableNode(node)) {
         continue;
       }
       if (charCount + text.length > MAX_BATCH_CHARS && nodes.length) {
         state.queue.unshift(node);
+        state.queued.add(node);
         break;
       }
       nodes.push(node);
@@ -317,8 +325,8 @@
           break;
         }
 
-        applyTranslations(nodes, result.translations || []);
-        state.translatedCount += nodes.length;
+        const appliedCount = applyTranslations(nodes, result.translations || []);
+        state.translatedCount += appliedCount;
         setStatus(`已翻译 ${state.translatedCount} 段`);
         await sleep(60);
       }
@@ -330,6 +338,7 @@
   }
 
   function applyTranslations(nodes, translations) {
+    let appliedCount = 0;
     nodes.forEach((node, index) => {
       const translatedText = translations[index];
       if (!translatedText || !node.parentNode) {
@@ -346,8 +355,12 @@
       state.translationCache.set(cacheKey, translatedText);
       node.nodeValue = renderTranslation(original, translatedText);
       state.translated.add(node);
+      state.partiallyTranslated.delete(node);
+      state.failed.delete(node);
+      appliedCount += 1;
     });
     state.showingOriginal = false;
+    return appliedCount;
   }
 
   function applyCachedTranslation(node, translatedText) {
@@ -359,9 +372,164 @@
     state.translationByNode.set(node, { key: cacheKeyForText(original), text: translatedText });
     node.nodeValue = renderTranslation(original, translatedText);
     state.translated.add(node);
-    state.failed.delete?.(node);
+    state.partiallyTranslated.delete(node);
+    state.failed.delete(node);
     state.showingOriginal = false;
     return true;
+  }
+
+  function collectSelectedTextItems() {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
+
+    const items = [];
+    for (let rangeIndex = 0; rangeIndex < selection.rangeCount; rangeIndex += 1) {
+      const range = selection.getRangeAt(rangeIndex);
+      if (range.collapsed || !normalizeText(range.toString())) continue;
+
+      const root =
+        range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+          ? range.commonAncestorContainer.parentNode
+          : range.commonAncestorContainer;
+      if (!root) continue;
+
+      const addNode = (node) => {
+        if (isSkippableNode(node)) return;
+        const value = node.nodeValue || "";
+        let start = node === range.startContainer ? range.startOffset : 0;
+        let end = node === range.endContainer ? range.endOffset : value.length;
+        start = Math.max(0, Math.min(start, value.length));
+        end = Math.max(start, Math.min(end, value.length));
+        const selectedText = value.slice(start, end);
+        const text = normalizeText(selectedText);
+        if (text.length < 2) return;
+        if (!/[A-Za-z\u00C0-\u024F\u0400-\u052F\u3040-\u30FF\uAC00-\uD7AF]/.test(text)) return;
+        if (/^[\d\s.,:;!?()[\]{}'"“”‘’/@#$%^&*+=|\\-]+$/.test(text)) return;
+        items.push({ node, start, end, text: selectedText, normalizedText: text });
+      };
+
+      if (range.commonAncestorContainer.nodeType === Node.TEXT_NODE) {
+        addNode(range.commonAncestorContainer);
+        continue;
+      }
+
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          try {
+            return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          } catch {
+            return NodeFilter.FILTER_REJECT;
+          }
+        },
+      });
+
+      while (true) {
+        const node = walker.nextNode();
+        if (!node) break;
+        addNode(node);
+      }
+    }
+
+    return items;
+  }
+
+  function buildSelectionBatches(items) {
+    const batches = [];
+    let batch = [];
+    let charCount = 0;
+    for (const item of items) {
+      const length = item.normalizedText.length;
+      if (batch.length && (batch.length >= MAX_BATCH_ITEMS || charCount + length > MAX_BATCH_CHARS)) {
+        batches.push(batch);
+        batch = [];
+        charCount = 0;
+      }
+      batch.push(item);
+      charCount += length;
+    }
+    if (batch.length) batches.push(batch);
+    return batches;
+  }
+
+  function applySelectedTranslations(items, translations) {
+    let appliedCount = 0;
+    const indexedItems = items.map((item, index) => ({ ...item, translation: translations[index] }));
+    indexedItems.sort((a, b) => {
+      if (a.node === b.node) return b.start - a.start;
+      const position = a.node.compareDocumentPosition(b.node);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return 1;
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) return -1;
+      return 0;
+    });
+
+    for (const item of indexedItems) {
+      if (!item.translation || !item.node.parentNode) {
+        state.failed.add(item.node);
+        continue;
+      }
+      const currentText = item.node.nodeValue || "";
+      if (item.end > currentText.length) {
+        state.failed.add(item.node);
+        continue;
+      }
+      if (!state.originalText.has(item.node)) {
+        state.originalText.set(item.node, currentText);
+      }
+      const selectedText = currentText.slice(item.start, item.end);
+      const replacement = renderTranslation(selectedText, item.translation);
+      item.node.nodeValue =
+        currentText.slice(0, item.start) + replacement + currentText.slice(item.end);
+      state.translationCache.set(cacheKeyForText(item.text), item.translation);
+      state.translated.add(item.node);
+      state.partiallyTranslated.add(item.node);
+      state.failed.delete(item.node);
+      appliedCount += 1;
+    }
+    state.showingOriginal = false;
+    return appliedCount;
+  }
+
+  async function translateSelection() {
+    const items = collectSelectedTextItems();
+    if (!items.length) return false;
+    if (state.busy) {
+      setStatus("正在翻译，请稍候...");
+      return true;
+    }
+
+    const settings = await ensureSettings();
+    if (!settings) return true;
+    createToolbar();
+    state.busy = true;
+    updatePetState();
+
+    let appliedCount = 0;
+    try {
+      const batches = buildSelectionBatches(items);
+      for (const batch of batches) {
+        setStatus(`正在翻译选中内容 ${batch.length} 段...`);
+        const result = await sendMessage({
+          type: "translator:translate",
+          texts: batch.map((item) => item.normalizedText),
+          pageTitle: document.title,
+          pageUrl: location.href,
+        });
+
+        if (!result) break;
+        if (!result.ok) {
+          for (const item of batch) state.failed.add(item.node);
+          setStatus(result?.error || "翻译失败，请检查本地代理。", true);
+          return true;
+        }
+        appliedCount += applySelectedTranslations(batch, result.translations || []);
+      }
+      window.getSelection?.()?.removeAllRanges();
+      setStatus(`已翻译选中内容 ${appliedCount} 段`);
+      return true;
+    } finally {
+      state.busy = false;
+      updatePetState();
+    }
   }
 
   function restoreOriginals(root = document.body) {
@@ -373,7 +541,9 @@
       const original = state.originalText.get(node);
       if (original !== undefined) {
         node.nodeValue = original;
-        state.translated.delete?.(node);
+        state.translated.delete(node);
+        state.partiallyTranslated.delete(node);
+        state.failed.delete(node);
       }
     }
     state.showingOriginal = true;
@@ -404,6 +574,7 @@
 
   async function startTranslation() {
     if (state.enabled) {
+      state.failed = new WeakSet();
       enqueueVisibleText();
       return;
     }
@@ -425,6 +596,8 @@
     state.autoTranslate = true;
     state.translatedCount = 0;
     state.queue = [];
+    state.queued = new WeakSet();
+    state.failed = new WeakSet();
     createToolbar();
     setStatus("准备翻译...");
     attachObservers();
@@ -435,6 +608,7 @@
     state.enabled = false;
     state.autoTranslate = false;
     state.queue = [];
+    state.queued = new WeakSet();
     detachObservers();
     setStatus("已暂停");
   }
@@ -450,14 +624,22 @@
       state.mutationObserver = new MutationObserver((mutations) => {
         if (!state.enabled || !state.autoTranslate) return;
         for (const mutation of mutations) {
+          if (mutation.type === "characterData") {
+            const target = mutation.target;
+            if (target.nodeType === Node.TEXT_NODE && !state.translated.has(target)) {
+              scheduleScan(500, target.parentElement || document.body);
+            }
+          }
           for (const node of mutation.addedNodes) {
             if (node.nodeType === Node.ELEMENT_NODE) scheduleScan(500, node);
+            if (node.nodeType === Node.TEXT_NODE) scheduleScan(500, node.parentElement || document.body);
           }
         }
       });
       state.mutationObserver.observe(document.body, {
         childList: true,
         subtree: true,
+        characterData: true,
       });
     }
     window.addEventListener("scroll", handleScroll, { passive: true });
@@ -725,7 +907,11 @@
       }
       startTranslation();
     });
-    translate.addEventListener("click", startTranslation);
+    translate.addEventListener("mousedown", (event) => event.preventDefault());
+    translate.addEventListener("click", async () => {
+      const handledSelection = await translateSelection();
+      if (!handledSelection) startTranslation();
+    });
     pause.addEventListener("click", stopTranslation);
     restore.addEventListener("click", restorePage);
     settings.addEventListener("click", () => {
@@ -815,6 +1001,9 @@
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "translator:start") {
       startTranslation();
+    }
+    if (message?.type === "translator:translate-selection") {
+      translateSelection();
     }
     if (message?.type === "translator:toggle") {
       if (state.enabled) stopTranslation();

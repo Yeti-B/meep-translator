@@ -236,6 +236,11 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["page"],
   });
   chrome.contextMenus.create({
+    id: "translate-selection",
+    title: "用 meep-translator 翻译选中文字",
+    contexts: ["selection"],
+  });
+  chrome.contextMenus.create({
     id: "restore-page",
     title: "恢复原文",
     contexts: ["page"],
@@ -265,6 +270,9 @@ chrome.action.onClicked.addListener((tab) => {
 chrome.contextMenus.onClicked.addListener((info) => {
   if (info.menuItemId === "translate-page") {
     sendToActiveTab({ type: "translator:start" });
+  }
+  if (info.menuItemId === "translate-selection") {
+    sendToActiveTab({ type: "translator:translate-selection" });
   }
   if (info.menuItemId === "restore-page") {
     sendToActiveTab({ type: "translator:restore" });
