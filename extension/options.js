@@ -75,6 +75,13 @@ document.querySelectorAll('input[name="providerMode"]').forEach((input) => {
   input.addEventListener("change", () => setProviderMode(input.value));
 });
 
+fields.baseUrl.addEventListener("change", () => {
+  const value = fields.baseUrl.value.toLowerCase();
+  if (value.includes("colabapi") || value.includes("one-api") || value.includes("new-api")) {
+    fields.apiMode.value = "chat";
+  }
+});
+
 document.querySelector("#save").addEventListener("click", saveSettings);
 document.querySelector("#saveTop").addEventListener("click", saveSettings);
 document.querySelector("#test").addEventListener("click", testConnection);

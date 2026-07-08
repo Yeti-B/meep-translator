@@ -48,6 +48,11 @@ function extractResponsesText(data) {
 
 function parseTranslations(raw, expectedLength) {
   let text = String(raw || "").trim();
+  if (!text) {
+    throw new Error(
+      "API returned empty translation content. If you use an OpenAI-compatible gateway such as ColabAPI, choose 'Chat Completions compatible' in extension options.",
+    );
+  }
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) text = fence[1].trim();
 
@@ -57,7 +62,15 @@ function parseTranslations(raw, expectedLength) {
     text = text.slice(firstBracket, lastBracket + 1);
   }
 
-  const parsed = JSON.parse(text);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    const preview = text.slice(0, 180);
+    throw new Error(
+      `The model did not return a JSON translation array. Please check API mode and model. Response preview: ${preview}`,
+    );
+  }
   if (!Array.isArray(parsed)) {
     throw new Error("The model response was not a JSON array.");
   }
@@ -103,9 +116,20 @@ async function postJson(url, settings, body) {
     body: JSON.stringify(body),
   });
 
-  const data = await response.json().catch(() => ({}));
+  const raw = await response.text();
+  let data = {};
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`API returned non-JSON response: ${raw.slice(0, 180)}`);
+    }
+  }
   if (!response.ok) {
     throw new Error(data.error?.message || `API request failed with HTTP ${response.status}.`);
+  }
+  if (!raw) {
+    throw new Error("API returned an empty HTTP response. Check Base URL, API mode, and model name.");
   }
   return data;
 }
