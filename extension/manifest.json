@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Local OpenAI Page Translator",
+  "description": "Translate Edge webpages through a local OpenAI proxy while you keep scrolling.",
+  "version": "0.1.0",
+  "permissions": ["activeTab", "contextMenus", "storage", "scripting"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:8787/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Translate this page"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
