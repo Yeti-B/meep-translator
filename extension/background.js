@@ -3,8 +3,8 @@ const DEFAULT_SETTINGS = {
   apiKey: "",
   baseUrl: "https://api.openai.com/v1",
   apiMode: "responses",
-  modelPreset: "gpt-5.5",
-  model: "gpt-5.5",
+  modelPreset: "gpt-5.4-mini",
+  model: "gpt-5.4-mini",
   reasoningEffort: "low",
   textVerbosity: "low",
   endpoint: "http://127.0.0.1:8787",
@@ -13,9 +13,23 @@ const DEFAULT_SETTINGS = {
   mode: "replace",
 };
 
+const COMPATIBLE_FALLBACK_MODEL = "gpt-5.4-mini";
+const UNSUPPORTED_PRESET_MODELS = new Set(["gpt-5.4-nano"]);
+
+function normalizeSettings(settings) {
+  if (UNSUPPORTED_PRESET_MODELS.has(settings.model) || UNSUPPORTED_PRESET_MODELS.has(settings.modelPreset)) {
+    return {
+      ...settings,
+      modelPreset: COMPATIBLE_FALLBACK_MODEL,
+      model: COMPATIBLE_FALLBACK_MODEL,
+    };
+  }
+  return settings;
+}
+
 async function getSettings() {
   const stored = await chrome.storage.local.get(DEFAULT_SETTINGS);
-  return { ...DEFAULT_SETTINGS, ...stored };
+  return normalizeSettings({ ...DEFAULT_SETTINGS, ...stored });
 }
 
 function publicSettings(settings) {

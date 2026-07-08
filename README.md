@@ -30,7 +30,7 @@
 API Key：你的 sk-... key
 Base URL：https://api.openai.com/v1
 API 模式：Responses API
-模型：从下拉菜单选择 GPT-5.5
+模型：从下拉菜单选择 GPT-5.4 mini
 ```
 
 OpenAI-compatible 中转示例：
@@ -58,12 +58,12 @@ API 模式：Chat Completions 兼容
 
 ## 翻译建议
 
-官方 OpenAI 模型页建议：复杂任务从 `gpt-5.5` 起步；如果追求低延迟，可选择 `gpt-5.4-mini` 或 `gpt-5.4-nano`。
+翻译场景建议优先选择 `gpt-5.4-mini`，速度更快，也更适合 ChatGPT/Codex 账号的兼容模式。`gpt-5.4-nano` 更轻，但在部分 ChatGPT/Codex 账号环境中不可用；如果你的 API 或中转服务明确支持它，可以用“自定义模型名”手动填写。
 
 扩展里提供这些预设：
 
 ```text
-速度优先：GPT-5.4 nano、GPT-5.4 mini
+速度优先：GPT-5.4 mini
 质量优先：GPT-5.4、GPT-5.5
 自定义模型名：用于 ColabAPI、one-api、new-api 等中转服务；下拉选择“自定义模型名”后，在下方输入框填写服务商给出的模型名
 ```
@@ -71,7 +71,7 @@ API 模式：Chat Completions 兼容
 论文翻译推荐：
 
 ```text
-模型：gpt-5.5
+模型：gpt-5.4-mini
 推理强度：low
 输出长度：low
 ```
@@ -94,7 +94,7 @@ Copy-Item .\proxy\.env.example .\proxy\.env
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://colabapi.com/v1
 OPENAI_API_MODE=chat
-OPENAI_MODEL=gpt-5.5
+OPENAI_MODEL=gpt-5.4-mini
 OPENAI_HTTP_PROXY=http://127.0.0.1:7890
 ```
 

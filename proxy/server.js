@@ -32,7 +32,7 @@ function readEnvFile() {
 
 const env = { ...readEnvFile(), ...process.env };
 const OPENAI_API_KEY = env.OPENAI_API_KEY;
-const OPENAI_MODEL = env.OPENAI_MODEL || "gpt-5.5";
+const OPENAI_MODEL = env.OPENAI_MODEL || "gpt-5.4-mini";
 const OPENAI_BASE_URL = (env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
 const OPENAI_HTTP_PROXY = env.OPENAI_HTTP_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const OPENAI_API_MODE = (env.OPENAI_API_MODE || "responses").toLowerCase();
