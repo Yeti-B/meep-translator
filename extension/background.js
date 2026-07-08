@@ -18,6 +18,12 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
+function publicSettings(settings) {
+  const { apiKey, ...safeSettings } = settings;
+  safeSettings.hasApiKey = Boolean(apiKey);
+  return safeSettings;
+}
+
 async function saveSettings(patch) {
   await chrome.storage.local.set(patch);
   return getSettings();
@@ -270,11 +276,15 @@ chrome.contextMenus.onClicked.addListener((info) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "translator:get-settings") {
+    getSettings().then((settings) => sendResponse(publicSettings(settings)));
+    return true;
+  }
+  if (message?.type === "translator:get-private-settings") {
     getSettings().then(sendResponse);
     return true;
   }
   if (message?.type === "translator:save-settings") {
-    saveSettings(message.patch || {}).then(sendResponse);
+    saveSettings(message.patch || {}).then((settings) => sendResponse(publicSettings(settings)));
     return true;
   }
   if (message?.type === "translator:translate") {

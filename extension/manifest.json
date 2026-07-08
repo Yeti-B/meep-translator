@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Local OpenAI Page Translator",
   "description": "Translate Edge webpages with your own OpenAI-compatible API settings while you keep scrolling.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "permissions": ["activeTab", "contextMenus", "storage", "scripting"],
   "host_permissions": ["<all_urls>", "http://127.0.0.1:8787/*"],
   "options_page": "options.html",

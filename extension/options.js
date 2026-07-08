@@ -33,7 +33,7 @@ function setProviderMode(value) {
 }
 
 async function loadSettings() {
-  const settings = await chrome.runtime.sendMessage({ type: "translator:get-settings" });
+  const settings = await chrome.runtime.sendMessage({ type: "translator:get-private-settings" });
   setProviderMode(settings.providerMode || "direct");
   fields.apiKey.value = settings.apiKey || "";
   fields.baseUrl.value = settings.baseUrl || "";
