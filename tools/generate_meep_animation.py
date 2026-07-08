@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageSequence
+from PIL import Image, ImageDraw, ImageFilter, ImageSequence
 
 
 CANVAS_SIZE = 256
-FRAME_DURATION_MS = 80
+FRAME_COUNT = 18
+FRAME_DURATION_MS = 50
 
 
 def alpha_bbox(image: Image.Image) -> tuple[int, int, int, int]:
@@ -37,74 +39,55 @@ def fit_source(source_path: Path) -> Image.Image:
     return canvas
 
 
-def make_head_mask(base: Image.Image) -> Image.Image:
+def smoothstep(edge0: float, edge1: float, value: float) -> float:
+    if edge0 == edge1:
+        return 1.0 if value >= edge1 else 0.0
+    value = max(0.0, min(1.0, (value - edge0) / (edge1 - edge0)))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def make_body_motion_mask(base: Image.Image) -> Image.Image:
     alpha = base.getchannel("A")
-    shape = Image.new("L", base.size, 0)
-    draw = ImageDraw.Draw(shape)
+    mask = Image.new("L", base.size, 0)
+    pixels = mask.load()
 
-    # Keep the small bead eye, low head, and long bill nearly motionless.
-    draw.ellipse((161, 47, 209, 110), fill=255)
-    draw.polygon([(187, 78), (254, 113), (251, 135), (185, 98)], fill=255)
-    draw.polygon([(151, 68), (198, 63), (203, 121), (151, 112)], fill=255)
+    for y in range(CANVAS_SIZE):
+        lower_body = smoothstep(104, 154, y)
+        for x in range(CANVAS_SIZE):
+            alpha_value = alpha.getpixel((x, y))
+            if not alpha_value:
+                continue
 
-    return ImageChops.multiply(alpha, shape)
+            body_left = 1.0 - smoothstep(144, 194, x)
+            front_leg_zone = lower_body * (1.0 - smoothstep(214, 246, x))
+            weight = max(body_left, front_leg_zone)
+            pixels[x, y] = round(alpha_value * weight)
 
-
-def make_body_mask(base: Image.Image) -> Image.Image:
-    alpha = base.getchannel("A")
-    shape = Image.new("L", base.size, 0)
-    draw = ImageDraw.Draw(shape)
-
-    # The body layer overlaps the lower head/neck area. The fixed head layer
-    # covers that overlap, preventing cutout gaps when the body rocks.
-    draw.rectangle((0, 0, 176, CANVAS_SIZE), fill=255)
-    draw.polygon([(158, 82), (205, 112), (193, 178), (150, 174)], fill=255)
-    draw.rectangle((150, 118, 221, CANVAS_SIZE), fill=255)
-
-    return ImageChops.multiply(alpha, shape)
+    return mask.filter(ImageFilter.GaussianBlur(3.2))
 
 
-def isolate_layers(base: Image.Image) -> tuple[Image.Image, Image.Image]:
-    head_mask = make_head_mask(base)
-    body_mask = make_body_mask(base)
-
-    head = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    head.alpha_composite(base)
-    head.putalpha(head_mask)
-
-    body = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    body.alpha_composite(base)
-    body.putalpha(body_mask)
-    return body, head
-
-
-def paste_layer(canvas: Image.Image, layer: Image.Image, dx: int, dy: int) -> None:
-    bbox = alpha_bbox(layer)
-    crop = layer.crop(bbox)
-    canvas.alpha_composite(crop, (bbox[0] + dx, bbox[1] + dy))
+def shift_image(image: Image.Image, dx: float, dy: float) -> Image.Image:
+    return image.transform(
+        image.size,
+        Image.Transform.AFFINE,
+        (1, 0, -dx, 0, 1, -dy),
+        resample=Image.Resampling.BICUBIC,
+    )
 
 
 def build_frames(base: Image.Image) -> list[Image.Image]:
-    body, head = isolate_layers(base)
+    body_motion_mask = make_body_motion_mask(base)
     frames: list[Image.Image] = []
 
-    # Reference motion: the head/bill stays steady while the plump body
-    # rocks forward and back with a deliberately larger "meep" shuffle.
-    body_offsets = [
-        (-13, 2),
-        (-6, -1),
-        (5, -2),
-        (14, 1),
-        (8, 4),
-        (-3, 3),
-        (-12, 1),
-        (-7, -1),
-    ]
-
-    for dx, dy in body_offsets:
-        frame = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        paste_layer(frame, body, dx, dy)
-        frame.alpha_composite(head)
+    # Classic woodcock "meep" motion: the bill/head read as steady while the
+    # plump body rocks smoothly forward and back. This uses a feathered mask
+    # instead of cut layers, so the neck stays continuous without protrusions.
+    for index in range(FRAME_COUNT):
+        phase = (math.tau * index) / FRAME_COUNT
+        body_dx = 8.2 * math.sin(phase)
+        body_dy = 1.8 * math.cos(phase + math.pi * 0.15)
+        shifted_body = shift_image(base, body_dx, body_dy)
+        frame = Image.composite(shifted_body, base, body_motion_mask)
         frames.append(frame)
     return frames
 
