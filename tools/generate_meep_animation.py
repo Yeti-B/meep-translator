@@ -4,7 +4,8 @@ import argparse
 import math
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageSequence
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter, ImageSequence
 
 
 CANVAS_SIZE = 192
@@ -13,7 +14,8 @@ FRAME_DURATION_MS = 50
 PAUSE_DURATION_MS = 500
 SWING_CYCLES = 3
 CYCLE_FRAMES = 8
-BODY_SWING_PX = 11
+BODY_SWING_PX = 9.0
+BODY_BOB_PX = 0.5
 
 
 def alpha_bbox(image: Image.Image) -> tuple[int, int, int, int]:
@@ -54,67 +56,71 @@ def draw_scaled_ellipse(
     draw.ellipse(tuple(round(value * MASK_SCALE) for value in box), fill=fill)
 
 
-def mask_from_shapes(kind: str) -> Image.Image:
+def make_static_head_mask() -> Image.Image:
     size = CANVAS_SIZE * MASK_SCALE
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
 
-    if kind in {"head", "forbidden"}:
-        # Fixed no-body zone: head, full bill, bill root, mouth gap, and a
-        # broad front-chest cover. Head and forbidden use the same footprint
-        # so erased body pixels cannot leave an uncovered transparent seam.
-        draw_scaled_ellipse(draw, (114, 35, 164, 93), 255)
-        draw.polygon(scaled_points([(137, 56), (191, 79), (192, 111), (134, 91)]), fill=255)
-        draw.polygon(scaled_points([(126, 70), (176, 86), (176, 123), (120, 115)]), fill=255)
-        draw.polygon(scaled_points([(108, 52), (154, 47), (169, 139), (102, 145), (96, 87)]), fill=255)
-        draw.polygon(scaled_points([(102, 94), (160, 91), (160, 153), (104, 154)]), fill=255)
-    elif kind == "body":
-        # Body and legs only, with generous overlap under the fixed chest
-        # cover. The upper face/bill source pixels are intentionally excluded.
-        draw.rectangle((0, 0, round(118 * MASK_SCALE), size), fill=255)
-        draw.polygon(scaled_points([(108, 72), (156, 96), (160, 154), (96, 156)]), fill=255)
-        draw.rectangle((98 * MASK_SCALE, 120 * MASK_SCALE, 166 * MASK_SCALE, size), fill=255)
-    else:
-        raise ValueError(f"unknown mask kind: {kind}")
+    # Pin only the head, eye, bill, and bill root. The front chest and both
+    # legs remain in the moving region so the meep reads as a whole-body bob.
+    draw_scaled_ellipse(draw, (121, 37, 163, 91), 255)
+    draw.polygon(scaled_points([(141, 56), (191, 80), (192, 137), (138, 92)]), fill=255)
+    draw.polygon(scaled_points([(131, 69), (182, 88), (181, 134), (128, 112)]), fill=255)
+    draw.polygon(scaled_points([(114, 55), (151, 49), (160, 105), (116, 107), (106, 84)]), fill=255)
 
     return mask.resize((CANVAS_SIZE, CANVAS_SIZE), Image.Resampling.LANCZOS)
 
 
-def harden_mask(mask: Image.Image) -> Image.Image:
-    return mask.point(lambda value: 255 if value else 0)
+def make_motion_weight(base: Image.Image) -> Image.Image:
+    static_head = np.asarray(make_static_head_mask(), dtype=np.float32) / 255.0
+    static_head = np.asarray(
+        Image.fromarray(np.uint8(static_head * 255)).filter(ImageFilter.GaussianBlur(0.7)),
+        dtype=np.float32,
+    ) / 255.0
+
+    alpha = np.asarray(base.getchannel("A"), dtype=np.float32) / 255.0
+    weight = 1.0 - static_head
+    weight = np.clip(weight * alpha, 0.0, 1.0)
+    return Image.fromarray(np.uint8(np.round(weight * 255)), "L")
 
 
-def apply_mask(image: Image.Image, mask: Image.Image) -> Image.Image:
-    alpha = ImageChops.multiply(image.getchannel("A"), mask)
-    layer = image.copy()
-    layer.putalpha(alpha)
-    return layer
+def bilinear_sample(image_array: np.ndarray, sample_x: np.ndarray, sample_y: np.ndarray) -> np.ndarray:
+    height, width, _ = image_array.shape
+    sample_x = np.clip(sample_x, 0.0, width - 1.001)
+    sample_y = np.clip(sample_y, 0.0, height - 1.001)
+
+    x0 = np.floor(sample_x).astype(np.int32)
+    y0 = np.floor(sample_y).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, width - 1)
+    y1 = np.clip(y0 + 1, 0, height - 1)
+
+    wx = sample_x - x0
+    wy = sample_y - y0
+
+    top = image_array[y0, x0] * (1.0 - wx[..., None]) + image_array[y0, x1] * wx[..., None]
+    bottom = image_array[y1, x0] * (1.0 - wx[..., None]) + image_array[y1, x1] * wx[..., None]
+    return top * (1.0 - wy[..., None]) + bottom * wy[..., None]
 
 
-def shift_layer(image: Image.Image, dx: float, dy: float) -> Image.Image:
-    return image.transform(
-        image.size,
-        Image.Transform.AFFINE,
-        (1, 0, -dx, 0, 1, -dy),
-        resample=Image.Resampling.BICUBIC,
-    )
+def warp_frame(base: Image.Image, weight: Image.Image, dx: float, dy: float) -> Image.Image:
+    image_array = np.asarray(base, dtype=np.float32)
+    motion = np.asarray(weight, dtype=np.float32) / 255.0
+    yy, xx = np.mgrid[0:CANVAS_SIZE, 0:CANVAS_SIZE].astype(np.float32)
 
-
-def erase_forbidden_pixels(body: Image.Image, forbidden_mask: Image.Image) -> Image.Image:
-    hard_forbidden = harden_mask(forbidden_mask)
-    allowed = ImageChops.invert(hard_forbidden)
-    cleaned = body.copy()
-    cleaned.putalpha(ImageChops.multiply(cleaned.getchannel("A"), allowed))
-    return cleaned
+    sample_x = xx - dx * motion
+    sample_y = yy - dy * motion
+    warped = bilinear_sample(image_array, sample_x, sample_y)
+    warped = np.clip(np.round(warped), 0, 255).astype(np.uint8)
+    return Image.fromarray(warped)
 
 
 def make_offsets() -> list[tuple[float, float]]:
     offsets: list[tuple[float, float]] = []
-    for cycle in range(SWING_CYCLES):
+    for _ in range(SWING_CYCLES):
         for frame in range(CYCLE_FRAMES):
             phase = math.tau * frame / CYCLE_FRAMES
             dx = BODY_SWING_PX * math.sin(phase)
-            dy = 0.8 * math.sin(phase + math.pi / 2)
+            dy = BODY_BOB_PX * math.cos(phase)
             offsets.append((dx, dy))
     offsets.append((0.0, 0.0))
     return offsets
@@ -126,32 +132,10 @@ def make_durations(frame_count: int) -> list[int]:
     return [FRAME_DURATION_MS] * (frame_count - 1) + [PAUSE_DURATION_MS]
 
 
-def build_frames(base: Image.Image) -> tuple[list[Image.Image], Image.Image, Image.Image, Image.Image]:
-    head_mask = mask_from_shapes("head")
-    body_mask = mask_from_shapes("body")
-    forbidden_mask = mask_from_shapes("forbidden")
-    head_layer = apply_mask(base, harden_mask(head_mask))
-    body_layer = apply_mask(base, body_mask)
-
-    frames: list[Image.Image] = []
-    guard_violations = Image.new("L", base.size, 0)
-    post_clean_violations = Image.new("L", base.size, 0)
-
-    for dx, dy in make_offsets():
-        shifted_body = shift_layer(body_layer, dx, dy)
-        shifted_alpha = shifted_body.getchannel("A")
-        violation = ImageChops.multiply(shifted_alpha, forbidden_mask)
-        guard_violations = ImageChops.lighter(guard_violations, violation)
-        cleaned_body = erase_forbidden_pixels(shifted_body, forbidden_mask)
-        post_clean_violation = ImageChops.multiply(cleaned_body.getchannel("A"), forbidden_mask)
-        post_clean_violations = ImageChops.lighter(post_clean_violations, post_clean_violation)
-
-        frame = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        frame.alpha_composite(cleaned_body)
-        frame.alpha_composite(head_layer)
-        frames.append(frame)
-
-    return frames, forbidden_mask, guard_violations, post_clean_violations
+def build_frames(base: Image.Image) -> tuple[list[Image.Image], Image.Image]:
+    weight = make_motion_weight(base)
+    frames = [warp_frame(base, weight, dx, dy) for dx, dy in make_offsets()]
+    return frames, weight
 
 
 def save_preview(frames: list[Image.Image], preview_path: Path) -> None:
@@ -169,9 +153,9 @@ def save_preview(frames: list[Image.Image], preview_path: Path) -> None:
     sheet.save(preview_path)
 
 
-def nonzero_pixel_count(mask: Image.Image) -> int:
-    histogram = mask.histogram()
-    return sum(histogram[1:])
+def save_weight_preview(weight: Image.Image, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    weight.save(path)
 
 
 def main() -> None:
@@ -191,13 +175,18 @@ def main() -> None:
         type=Path,
         default=Path("extension/icons/woodcock-meep-preview.png"),
     )
+    parser.add_argument(
+        "--weight-preview",
+        type=Path,
+        default=Path("extension/icons/woodcock-meep-weight.png"),
+    )
     args = parser.parse_args()
 
     if not args.source.exists():
         raise FileNotFoundError(f"missing animation source: {args.source}")
 
     base = fit_source(args.source)
-    frames, forbidden_mask, guard_violations, post_clean_violations = build_frames(base)
+    frames, weight = build_frames(base)
     durations = make_durations(len(frames))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -212,25 +201,15 @@ def main() -> None:
         disposal=2,
     )
     save_preview(frames, args.preview)
+    save_weight_preview(weight, args.weight_preview)
 
     with Image.open(args.out) as animated:
         frame_count = sum(1 for _ in ImageSequence.Iterator(animated))
 
-    forbidden_pixels = nonzero_pixel_count(forbidden_mask)
-    violation_pixels = nonzero_pixel_count(guard_violations)
-    post_clean_violation_pixels = nonzero_pixel_count(post_clean_violations)
-    if post_clean_violation_pixels:
-        raise RuntimeError(
-            "shifted body still has visible pixels inside forbidden mask "
-            f"after cleanup: {post_clean_violation_pixels}"
-        )
-
     print(f"wrote {args.out} ({frame_count} frames)")
     print(f"wrote {args.preview}")
+    print(f"wrote {args.weight_preview}")
     print(f"timing: {frame_count - 1} motion frames @ {FRAME_DURATION_MS}ms + 1 pause @ {PAUSE_DURATION_MS}ms")
-    print(f"forbidden pixels checked: {forbidden_pixels}")
-    print(f"shifted body pixels erased from forbidden zone: {violation_pixels}")
-    print("post-clean shifted body pixels in forbidden zone: 0")
 
 
 if __name__ == "__main__":
