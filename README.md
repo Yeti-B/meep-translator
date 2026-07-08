@@ -39,7 +39,7 @@ OPENAI_REASONING_EFFORT=low
 OPENAI_TEXT_VERBOSITY=low
 ```
 
-如果主要翻译具身智能、机器人、VLA、强化学习等论文，并且不优先考虑成本，建议直接用 `gpt-5.5`。翻译任务通常不需要很高推理强度，先用 `OPENAI_REASONING_EFFORT=low` 能兼顾术语质量和响应速度；如果遇到特别绕的理论段落，可以改成 `medium`。如果你已经运行过启动脚本并生成了 `proxy/.env`，请改 `proxy/.env` 里的这些配置，因为 `.env.example` 不会自动覆盖已有配置。
+如果优先考虑成本可直接用 `gpt-5.5`。翻译任务通常不需要很高推理强度，先用 `OPENAI_REASONING_EFFORT=low` 能兼顾术语质量和响应速度；如果遇到特别绕的理论段落，可以改成 `medium`。如果你已经运行过启动脚本并生成了 `proxy/.env`，请改 `proxy/.env` 里的这些配置，因为 `.env.example` 不会自动覆盖已有配置。
 
 如果使用 OpenAI-compatible 中转，例如 `https://colabapi.com/v1`，并且它不支持 `/v1/responses`，可以改成：
 
@@ -73,7 +73,7 @@ OpenAI page translate proxy listening on http://127.0.0.1:8787
 
 ## 4. 使用
 
-- 打开一个英文网页。
+- 打开一个外语网页。
 - 点击浏览器工具栏里的扩展图标，开始翻译。
 - 也可以在页面空白处右键，选择“用 OpenAI 翻译此页”。
 - 页面右上角会出现一个小翻译条：
