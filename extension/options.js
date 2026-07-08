@@ -15,8 +15,12 @@ const directPanel = document.querySelector("#directPanel");
 const proxyPanel = document.querySelector("#proxyPanel");
 const statusEl = document.querySelector("#status");
 const DEFAULT_MODEL = "gpt-5.4-mini";
-const MODEL_PRESETS = new Set(["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]);
-const UNSUPPORTED_PRESET_MODELS = new Set(["gpt-5.4-nano"]);
+const MODEL_PRESETS = new Set([
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5.4",
+  "gpt-5.5",
+]);
 
 function setStatus(text, type = "") {
   statusEl.textContent = text;
@@ -46,9 +50,7 @@ async function loadSettings() {
   fields.targetLanguage.value = settings.targetLanguage || "Simplified Chinese";
   fields.mode.value = settings.mode || "replace";
 
-  const storedModel = UNSUPPORTED_PRESET_MODELS.has(settings.model)
-    ? DEFAULT_MODEL
-    : settings.model || DEFAULT_MODEL;
+  const storedModel = settings.model || DEFAULT_MODEL;
   if (MODEL_PRESETS.has(storedModel)) {
     fields.modelPreset.value = storedModel;
     fields.customModel.value = "";
@@ -114,7 +116,13 @@ fields.baseUrl.addEventListener("change", () => {
 fields.modelPreset.addEventListener("change", () => {
   if (fields.modelPreset.value === "custom") {
     fields.customModel.focus();
+    return;
   }
+  if (fields.modelPreset.value.endsWith("-nano")) {
+    setStatus("nano 最便宜也更快；如果当前账号提示不支持，请切回 GPT-5.4 mini。");
+    return;
+  }
+  setStatus("");
 });
 
 fields.customModel.addEventListener("input", () => {

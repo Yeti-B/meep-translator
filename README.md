@@ -58,15 +58,18 @@ API 模式：Chat Completions 兼容
 
 ## 翻译建议
 
-翻译场景建议优先选择 `gpt-5.4-mini`，速度更快，也更适合 ChatGPT/Codex 账号的兼容模式。`gpt-5.4-nano` 更轻，但在部分 ChatGPT/Codex 账号环境中不可用；如果你的 API 或中转服务明确支持它，可以用“自定义模型名”手动填写。
+翻译场景建议优先从 `gpt-5.4-mini` 开始：速度快，兼容性最好。如果你使用的是 API Key 或 OpenAI-compatible 中转，并且服务商支持更轻量模型，可以尝试 `gpt-5.4-nano` 来进一步降低延迟和成本。
 
 扩展里提供这些预设：
 
 ```text
-速度优先：GPT-5.4 mini
+兼容速度优先：GPT-5.4 mini
+最低成本 / API 或中转：GPT-5.4 nano
 质量优先：GPT-5.4、GPT-5.5
 自定义模型名：用于 ColabAPI、one-api、new-api 等中转服务；下拉选择“自定义模型名”后，在下方输入框填写服务商给出的模型名
 ```
+
+如果看到类似 `model is not supported when using Codex with a ChatGPT account`，说明当前账号/通道不支持这个模型名，切回 `gpt-5.4-mini` 即可。追求最低成本时，优先试 `gpt-5.4-nano`；追求翻译稳定性和速度平衡时，优先用 `gpt-5.4-mini`。中转服务支持的其他低价模型可以通过“自定义模型名”填写。
 
 论文翻译推荐：
 
