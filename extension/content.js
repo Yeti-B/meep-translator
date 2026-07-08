@@ -42,6 +42,9 @@
     dock: null,
     status: null,
     petButton: null,
+    petImage: null,
+    idleIconUrl: "",
+    activeIconUrl: "",
     drag: null,
     mutationObserver: null,
     scrollTimer: 0,
@@ -74,6 +77,14 @@
   function getIconUrl() {
     try {
       return chrome.runtime.getURL("icons/woodcock-128.png");
+    } catch {
+      return "";
+    }
+  }
+
+  function getAnimatedIconUrl() {
+    try {
+      return chrome.runtime.getURL("icons/woodcock-meep.webp");
     } catch {
       return "";
     }
@@ -477,6 +488,9 @@
     host.id = UI_ID;
     const shadow = host.attachShadow({ mode: "closed" });
     const iconUrl = getIconUrl();
+    const animatedIconUrl = getAnimatedIconUrl();
+    state.idleIconUrl = iconUrl;
+    state.activeIconUrl = animatedIconUrl || iconUrl;
     shadow.innerHTML = `
       <style>
         :host {
@@ -517,13 +531,6 @@
           filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.28));
           outline: none;
         }
-        .pet-art {
-          position: absolute;
-          inset: 0;
-          display: block;
-          pointer-events: none;
-          user-select: none;
-        }
         .pet img {
           position: absolute;
           inset: 0;
@@ -533,17 +540,6 @@
           object-fit: contain;
           pointer-events: none;
           user-select: none;
-        }
-        .pet-body {
-          clip-path: inset(0 34% 0 0);
-          transform-origin: 46% 78%;
-        }
-        .pet-head {
-          clip-path: inset(0 0 0 56%);
-          transform-origin: 72% 45%;
-        }
-        :host([data-busy="true"]) .pet-body {
-          animation: meep-body-rock 2800ms ease-in-out infinite;
         }
         .panel {
           position: absolute;
@@ -604,32 +600,10 @@
         select {
           padding: 0 24px 0 8px;
         }
-        @keyframes meep-body-rock {
-          0%, 8% {
-            transform: translateX(0) translateY(0) rotate(0deg) scaleX(1) scaleY(1);
-          }
-          16% {
-            transform: translateX(-3px) translateY(1px) rotate(-2deg) scaleX(1.025) scaleY(0.985);
-          }
-          24% {
-            transform: translateX(3px) translateY(-1px) rotate(2deg) scaleX(0.985) scaleY(1.015);
-          }
-          32% {
-            transform: translateX(-2px) translateY(1px) rotate(-1.6deg) scaleX(1.02) scaleY(0.99);
-          }
-          40% {
-            transform: translateX(2px) translateY(-1px) rotate(1.6deg) scaleX(0.99) scaleY(1.012);
-          }
-          48%, 100% {
-            transform: translateX(0) translateY(0) rotate(0deg) scaleX(1) scaleY(1);
-          }
-        }
         @media (prefers-reduced-motion: reduce) {
           .pet,
-          .pet-body,
-          .panel,
-          :host([data-busy="true"]) .pet-body {
-            animation: none;
+          .pet img,
+          .panel {
             transition: none;
           }
         }
@@ -656,10 +630,7 @@
       </style>
       <div class="dock" role="region" aria-label="meep-translator">
         <button class="pet" type="button" title="meep-translator" aria-label="开始翻译页面" aria-pressed="false">
-          <span class="pet-art" aria-hidden="true">
-            <img class="pet-body" src="${iconUrl}" alt="" />
-            <img class="pet-head" src="${iconUrl}" alt="" />
-          </span>
+          <img src="${iconUrl}" alt="" aria-hidden="true" />
         </button>
         <div class="panel">
           <span class="title">meep-translator</span>
@@ -688,6 +659,7 @@
     state.dock = shadow.querySelector(".dock");
     state.status = shadow.querySelector(".status");
     state.petButton = shadow.querySelector(".pet");
+    state.petImage = shadow.querySelector(".pet img");
 
     const language = shadow.querySelector(".language");
     const mode = shadow.querySelector(".mode");
@@ -799,9 +771,17 @@
   }
 
   function updatePetState() {
+    const isBusy = state.enabled && state.busy;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
     state.toolbar?.setAttribute("data-active", String(state.enabled));
-    state.toolbar?.setAttribute("data-busy", String(state.enabled && state.busy));
+    state.toolbar?.setAttribute("data-busy", String(isBusy));
     state.petButton?.setAttribute("aria-pressed", String(state.enabled));
+    if (state.petImage) {
+      const nextSrc = isBusy && !reduceMotion ? state.activeIconUrl : state.idleIconUrl;
+      if (nextSrc && state.petImage.src !== nextSrc) {
+        state.petImage.src = nextSrc;
+      }
+    }
   }
 
   createToolbar();

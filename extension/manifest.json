@@ -33,7 +33,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["icons/woodcock-128.png"],
+      "resources": ["icons/woodcock-128.png", "icons/woodcock-meep.webp"],
       "matches": ["<all_urls>"]
     }
   ]
