@@ -120,6 +120,7 @@ async function translateTexts({ texts, targetLanguage, sourceLanguage, pageTitle
       ? `The source language is ${sourceLanguage}.`
       : "Detect the source language automatically.",
     "Return ONLY a JSON array of strings, with exactly one translated string for each input string, in the same order.",
+    "Translate every natural-language sentence fragment; do not return an English clause unchanged unless the target language is English.",
     "Preserve numbers, product names, code identifiers, URLs, email addresses, and inline punctuation where natural.",
     "Do not add explanations, markdown, indexes, or extra fields.",
     pageTitle ? `Page title: ${pageTitle}` : "",

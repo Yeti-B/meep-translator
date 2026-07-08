@@ -25,9 +25,11 @@
   const MAX_BATCH_ITEMS = 32;
   const MAX_BATCH_CHARS = 4200;
   const MAX_SELECTION_CHARS = 12000;
+  const MAX_TRANSLATION_RETRIES = 2;
   const SELECTION_TRANSLATION_ATTR = "data-meep-selection-translation";
   const TRANSLATABLE_TEXT_PATTERN = /[A-Za-z\u00C0-\u024F\u0400-\u052F\u3040-\u30FF\uAC00-\uD7AF]/;
   const PUNCTUATION_ONLY_PATTERN = /^[\d\s.,:;!?()[\]{}'"“”‘’/@#$%^&*+=|\\-]+$/;
+  const CJK_PATTERN = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/;
 
   const state = {
     enabled: false,
@@ -41,12 +43,15 @@
     translationByNode: new WeakMap(),
     translationCache: new Map(),
     selectionOriginalFragments: new WeakMap(),
+    translationRetries: new WeakMap(),
     translated: new WeakSet(),
     partiallyTranslated: new WeakSet(),
     showingOriginal: false,
     failed: new WeakSet(),
     selectionBusy: false,
     toolbar: null,
+    selectionButton: null,
+    selectionButtonTimer: 0,
     dock: null,
     status: null,
     petButton: null,
@@ -205,6 +210,38 @@
     if (normalized.length < 2) return false;
     if (!TRANSLATABLE_TEXT_PATTERN.test(normalized)) return false;
     if (PUNCTUATION_ONLY_PATTERN.test(normalized)) return false;
+    return true;
+  }
+
+  function wordCount(text) {
+    return normalizeText(text).split(/\s+/).filter(Boolean).length;
+  }
+
+  function isCjkTargetLanguage() {
+    return /chinese|中文|japanese|日本|korean|한국/i.test(state.settings?.targetLanguage || "");
+  }
+
+  function looksUntranslated(original, translatedText) {
+    const source = normalizeText(original);
+    const translated = normalizeText(translatedText || "");
+    if (!translated) return true;
+    if (!isCjkTargetLanguage()) return false;
+    if (wordCount(source) < 4 || !/[A-Za-z]/.test(source)) return false;
+    if (CJK_PATTERN.test(translated)) return false;
+    return source.toLowerCase() === translated.toLowerCase();
+  }
+
+  function requeueNodeForRetry(node) {
+    const retryCount = state.translationRetries.get(node) || 0;
+    state.inFlight.delete(node);
+    if (retryCount >= MAX_TRANSLATION_RETRIES || !node.parentNode) {
+      state.failed.add(node);
+      return false;
+    }
+    state.translationRetries.set(node, retryCount + 1);
+    state.failed.delete(node);
+    state.queued.add(node);
+    state.queue.unshift(node);
     return true;
   }
 
@@ -391,16 +428,20 @@
     let appliedCount = 0;
     nodes.forEach((node, index) => {
       const translatedText = translations[index];
-      if (!translatedText || !node.parentNode) {
+      const original = state.originalText.get(node) || node.nodeValue || "";
+      if (!node.parentNode) {
         state.failed.add(node);
         state.inFlight.delete(node);
+        return;
+      }
+      if (looksUntranslated(original, translatedText)) {
+        requeueNodeForRetry(node);
         return;
       }
       if (!state.originalText.has(node)) {
         state.originalText.set(node, node.nodeValue);
       }
 
-      const original = state.originalText.get(node);
       const cacheKey = cacheKeyForText(original);
       state.translationByNode.set(node, { key: cacheKey, text: translatedText });
       state.translationCache.set(cacheKey, translatedText);
@@ -409,6 +450,7 @@
       state.inFlight.delete(node);
       state.partiallyTranslated.delete(node);
       state.failed.delete(node);
+      state.translationRetries.delete(node);
       appliedCount += 1;
     });
     state.showingOriginal = false;
@@ -426,6 +468,7 @@
     state.translated.add(node);
     state.partiallyTranslated.delete(node);
     state.failed.delete(node);
+    state.translationRetries.delete(node);
     state.showingOriginal = false;
     return true;
   }
@@ -583,6 +626,7 @@
     const item = collectSelectedRangeItem(expectedText);
     if (item?.blocked) return true;
     if (!item) return false;
+    hideSelectionButton();
     if (state.selectionBusy) {
       setStatus("正在翻译，请稍候...");
       return true;
@@ -627,6 +671,123 @@
       updatePetState();
       if (state.enabled && state.queue.length && !state.busy) processQueue();
     }
+  }
+
+  function getActiveSelectionRange() {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+
+    for (let index = selection.rangeCount - 1; index >= 0; index -= 1) {
+      const range = selection.getRangeAt(index);
+      if (range.collapsed) continue;
+      const selectedText = normalizeSelectionText(range.toString());
+      if (!isTranslatableText(selectedText)) continue;
+      if (selectedText.length > MAX_SELECTION_CHARS) continue;
+      if (isSelectionBlockedNode(range.commonAncestorContainer)) continue;
+      return range;
+    }
+    return null;
+  }
+
+  function getVisibleSelectionRect(range) {
+    const rects = Array.from(range.getClientRects()).filter((rect) => {
+      return rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.top <= window.innerHeight;
+    });
+    return rects[rects.length - 1] || range.getBoundingClientRect();
+  }
+
+  function createSelectionButton() {
+    if (state.selectionButton) return state.selectionButton;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "翻译选中";
+    button.setAttribute("aria-label", "翻译选中内容");
+    button.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "display:none",
+      "box-sizing:border-box",
+      "min-width:72px",
+      "height:34px",
+      "padding:0 12px",
+      "border:1px solid rgba(0,0,0,.14)",
+      "border-radius:8px",
+      "background:#2563eb",
+      "color:#fff",
+      "box-shadow:0 8px 24px rgba(0,0,0,.24)",
+      "font:600 13px/1 \"Segoe UI\", system-ui, sans-serif",
+      "cursor:pointer",
+      "user-select:none",
+    ].join(";");
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await translateSelection();
+    });
+    document.documentElement.appendChild(button);
+    state.selectionButton = button;
+    return button;
+  }
+
+  function hideSelectionButton() {
+    window.clearTimeout(state.selectionButtonTimer);
+    if (state.selectionButton) {
+      state.selectionButton.style.display = "none";
+    }
+  }
+
+  function updateSelectionButton() {
+    const range = getActiveSelectionRange();
+    if (!range) {
+      hideSelectionButton();
+      return;
+    }
+
+    const rect = getVisibleSelectionRect(range);
+    if (!rect || (!rect.width && !rect.height)) {
+      hideSelectionButton();
+      return;
+    }
+
+    const button = createSelectionButton();
+    button.style.display = "block";
+    const buttonWidth = button.offsetWidth || 88;
+    const buttonHeight = button.offsetHeight || 34;
+    const margin = 8;
+    const left = Math.max(
+      margin,
+      Math.min(rect.right - buttonWidth, window.innerWidth - buttonWidth - margin),
+    );
+    const top =
+      rect.bottom + buttonHeight + margin <= window.innerHeight
+        ? rect.bottom + margin
+        : Math.max(margin, rect.top - buttonHeight - margin);
+    button.style.left = `${left}px`;
+    button.style.top = `${top}px`;
+  }
+
+  function scheduleSelectionButtonUpdate(delay = 80) {
+    window.clearTimeout(state.selectionButtonTimer);
+    state.selectionButtonTimer = window.setTimeout(updateSelectionButton, delay);
+  }
+
+  function handleSelectionPointerDown(event) {
+    if (state.selectionButton?.contains(event.target)) return;
+    if (event.target?.closest?.(`#${UI_ID}`)) return;
+    hideSelectionButton();
+  }
+
+  function attachSelectionButtonListeners() {
+    document.addEventListener("selectionchange", () => scheduleSelectionButtonUpdate(80));
+    document.addEventListener("mouseup", () => scheduleSelectionButtonUpdate(40), true);
+    document.addEventListener("keyup", () => scheduleSelectionButtonUpdate(40), true);
+    document.addEventListener("pointerdown", handleSelectionPointerDown, true);
+    window.addEventListener("scroll", () => scheduleSelectionButtonUpdate(40), { passive: true });
+    window.addEventListener("resize", () => scheduleSelectionButtonUpdate(40));
   }
 
   function restoreOriginals(root = document.body) {
@@ -1101,6 +1262,7 @@
     }
   }
 
+  attachSelectionButtonListeners();
   createToolbar();
 
   chrome.runtime.onMessage.addListener((message) => {

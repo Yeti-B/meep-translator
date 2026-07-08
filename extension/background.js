@@ -102,6 +102,7 @@ function buildPrompt(payload, settings) {
       ? `The source language is ${settings.sourceLanguage}.`
       : "Detect the source language automatically.",
     "Return ONLY a JSON array of strings, with exactly one translated string for each input string, in the same order.",
+    "Translate every natural-language sentence fragment; do not return an English clause unchanged unless the target language is English.",
     "Preserve numbers, paper titles, method names, robotics terms, code identifiers, URLs, and inline punctuation where natural.",
     "Do not add explanations, markdown, indexes, or extra fields.",
     payload.pageTitle ? `Page title: ${payload.pageTitle}` : "",
@@ -216,41 +217,65 @@ async function translateBatch(payload) {
 async function sendToActiveTab(message) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
-  chrome.tabs.sendMessage(tab.id, message).catch(async () => {
+  sendToTab(tab.id, message);
+}
+
+async function sendToTab(tabId, message) {
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, message).catch(async () => {
     try {
       await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId },
         files: ["content.js"],
       });
-      await chrome.tabs.sendMessage(tab.id, message);
+      await chrome.tabs.sendMessage(tabId, message);
     } catch {
       // Some pages, such as extension and browser pages, cannot be scripted.
     }
   });
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "translate-page",
-    title: "用 meep-translator 翻译此页",
-    contexts: ["page"],
+function createContextMenu(item) {
+  chrome.contextMenus.create(item, () => {
+    // Re-registering after reload can briefly race with Edge's persisted menu state.
+    void chrome.runtime.lastError;
   });
-  chrome.contextMenus.create({
-    id: "translate-selection",
-    title: "用 meep-translator 翻译选中文字",
-    contexts: ["selection"],
+}
+
+function registerContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    createContextMenu({
+      id: "translate-page",
+      title: "用 meep-translator 翻译此页",
+      contexts: ["page"],
+    });
+    createContextMenu({
+      id: "translate-selection",
+      title: "用 meep-translator 翻译选中文字",
+      contexts: ["selection"],
+    });
+    createContextMenu({
+      id: "restore-page",
+      title: "恢复原文",
+      contexts: ["page"],
+    });
+    createContextMenu({
+      id: "open-settings",
+      title: "打开翻译设置",
+      contexts: ["action", "page"],
+    });
   });
-  chrome.contextMenus.create({
-    id: "restore-page",
-    title: "恢复原文",
-    contexts: ["page"],
+}
+
+function updateContextMenu(id, patch) {
+  chrome.contextMenus.update(id, patch, () => {
+    void chrome.runtime.lastError;
   });
-  chrome.contextMenus.create({
-    id: "open-settings",
-    title: "打开翻译设置",
-    contexts: ["action", "page"],
-  });
-});
+}
+
+registerContextMenus();
+chrome.runtime.onInstalled.addListener(registerContextMenus);
+chrome.runtime.onStartup.addListener(registerContextMenus);
 
 chrome.action.onClicked.addListener((tab) => {
   if (!tab?.id) return;
@@ -267,22 +292,31 @@ chrome.action.onClicked.addListener((tab) => {
   });
 });
 
-chrome.contextMenus.onClicked.addListener((info) => {
+chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "translate-page") {
-    sendToActiveTab({ type: "translator:start" });
+    sendToTab(tab?.id, { type: "translator:start" });
   }
   if (info.menuItemId === "translate-selection") {
-    sendToActiveTab({
+    sendToTab(tab?.id, {
       type: "translator:translate-selection",
       selectedText: info.selectionText || "",
     });
   }
   if (info.menuItemId === "restore-page") {
-    sendToActiveTab({ type: "translator:restore" });
+    sendToTab(tab?.id, { type: "translator:restore" });
   }
   if (info.menuItemId === "open-settings") {
     chrome.runtime.openOptionsPage();
   }
+});
+
+chrome.contextMenus.onShown.addListener((info) => {
+  const hasSelection = Boolean(info.selectionText?.trim());
+  updateContextMenu("translate-selection", { visible: hasSelection });
+  updateContextMenu("translate-page", { visible: !hasSelection });
+  updateContextMenu("restore-page", { visible: !hasSelection });
+  updateContextMenu("open-settings", { visible: !hasSelection });
+  chrome.contextMenus.refresh?.();
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
