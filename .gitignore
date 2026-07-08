@@ -3,3 +3,4 @@ node_modules/
 *.log
 .codex-tmp/
 extension/icons/woodcock-source.png
+extension/icons/woodcock-transparent.png
