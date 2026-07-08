@@ -100,6 +100,15 @@ def clean_transparent_pixels(image: Image.Image) -> Image.Image:
     return Image.fromarray(rgba, "RGBA")
 
 
+def add_canvas_guard(image: Image.Image) -> Image.Image:
+    guarded = image.copy()
+    pixels = guarded.load()
+    width, height = guarded.size
+    for point in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        pixels[point] = (0, 0, 0, 1)
+    return guarded
+
+
 def apply_alpha_mask(image: Image.Image, mask: np.ndarray) -> Image.Image:
     rgba = np.asarray(image.convert("RGBA"), dtype=np.float32).copy()
     rgba[..., 3] *= np.clip(mask, 0.0, 1.0)
@@ -227,18 +236,21 @@ def main() -> None:
 
     base = fit_source(args.source)
     frames, weight = build_frames(base)
+    guarded_frames = [add_canvas_guard(frame) for frame in frames]
     durations = make_durations(len(frames))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    frames[0].save(
+    guarded_frames[0].save(
         args.out,
         save_all=True,
-        append_images=frames[1:],
+        append_images=guarded_frames[1:],
         duration=durations,
         loop=0,
         lossless=True,
         method=6,
         exact=True,
+        kmin=1,
+        kmax=1,
     )
     if args.preview:
         save_preview(frames, args.preview)
