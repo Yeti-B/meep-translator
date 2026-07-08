@@ -522,9 +522,13 @@
           object-fit: contain;
           pointer-events: none;
           user-select: none;
+          transform-origin: 48% 78%;
         }
         :host([data-active="true"]) .pet {
-          animation: meep-walk 720ms ease-in-out infinite;
+          animation: meep-skitter 640ms steps(4, end) infinite;
+        }
+        :host([data-active="true"]) .pet img {
+          animation: meep-body-wobble 320ms ease-in-out infinite;
         }
         .panel {
           position: absolute;
@@ -585,16 +589,34 @@
         select {
           padding: 0 24px 0 8px;
         }
-        @keyframes meep-walk {
-          0%, 100% {
-            transform: translateY(0) rotate(-1deg);
+        @keyframes meep-skitter {
+          0% {
+            transform: translateX(0) translateY(0) rotate(-1deg);
+          }
+          25% {
+            transform: translateX(2px) translateY(-1px) rotate(1deg);
           }
           50% {
-            transform: translateY(-2px) rotate(1deg);
+            transform: translateX(0) translateY(0) rotate(-1deg);
+          }
+          75% {
+            transform: translateX(-2px) translateY(-1px) rotate(1deg);
+          }
+          100% {
+            transform: translateX(0) translateY(0) rotate(-1deg);
+          }
+        }
+        @keyframes meep-body-wobble {
+          0%, 100% {
+            transform: translateX(-2px) rotate(-4deg) scaleX(1.02) scaleY(0.98);
+          }
+          50% {
+            transform: translateX(3px) rotate(4deg) scaleX(0.98) scaleY(1.02);
           }
         }
         @media (prefers-reduced-motion: reduce) {
           .pet,
+          .pet img,
           .panel,
           :host([data-active="true"]) .pet {
             animation: none;
